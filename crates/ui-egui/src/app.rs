@@ -99,6 +99,10 @@ impl SoundApp {
             fonts_installed: false,
             system_fonts: true,
             theme_applied: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            suite_palette: craft_ui::theme::Palette::load().map(|loaded| loaded.palette),
+            #[cfg(not(target_arch = "wasm32"))]
+            palette_watcher: Some(craft_ui::theme::PaletteWatcher::from_env()),
             docking_context: None,
             sim: None,
             record_hint: None,
@@ -129,6 +133,35 @@ impl SoundApp {
         self
     }
 
+    /// The shared suite palette in use, if any. Web builds always use the built-in theme.
+    fn suite_palette(&self) -> Option<&craft_ui::theme::Palette> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.suite_palette.as_ref()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
+    }
+
+    /// Reload the suite palette when its file changes. A hidden window polls nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_palette(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|input| input.viewport().visible().unwrap_or(true)) {
+            return;
+        }
+        if let Some(watcher) = &mut self.palette_watcher {
+            if let Some(loaded) = watcher.poll(ctx) {
+                self.suite_palette = Some(loaded.palette);
+                self.theme_applied = None;
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn poll_palette(&mut self, _ctx: &egui::Context) {}
+
     /// Per-frame logic: control channel, transport, document sync.
     ///
     /// eframe calls this once per layout pass and also on logic-only ticks while hidden. Consumed
@@ -147,9 +180,12 @@ impl SoundApp {
                 ctx.request_repaint();
             }
         }
+        self.poll_palette(ctx);
         let light = theme::wants_light(ctx, self.ui.theme);
+        let palette = self.suite_palette();
+        let light = theme::effective_light(light, palette);
         if self.theme_applied != Some(light) || theme::is_light() != light {
-            theme::apply(ctx, light);
+            theme::apply_palette(ctx, light, palette);
             self.theme_applied = Some(light);
         }
         // A logic-only tick while hidden gets no fresh events: `ctx.input` still says what the last
