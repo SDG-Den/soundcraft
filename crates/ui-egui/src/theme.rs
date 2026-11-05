@@ -1,10 +1,15 @@
 //! Design tokens. Colours were chosen by eye to give a dark, studio-style look; they are ours.
 
+use craft_ui::theme::Palette;
 use egui::{Color32, FontFamily, FontId};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Whether the Light palette is active. Dark is the default (the incumbent is dark-only).
 static LIGHT_THEME: AtomicBool = AtomicBool::new(false);
+
+/// Tokens built from the shared suite palette, when one is in use. `None` means the built-in set.
+static PALETTE_TOKENS: Mutex<Option<Tokens>> = Mutex::new(None);
 
 /// Unit tests that change or read the process-wide palette must own it until their assertions
 /// finish. The lock is re-entrant per thread, so a test may hold it and still build apps
@@ -383,9 +388,95 @@ impl Tokens {
         slot_mark: Color32::from_rgb(92, 95, 102),
     };
 
+    /// Built-in tokens for the family with the shared suite palette mapped over the core chrome.
+    ///
+    /// Meters, faders, EQ, panner, timeline, clip and automation colours stay from the built-in set.
+    pub fn for_palette(light: bool, palette: &Palette) -> Tokens {
+        let mut t = if light { Self::LIGHT } else { Self::DARK };
+        let background = palette.background();
+        let surface = palette.surface();
+        let surface_alt = palette.surface_alt();
+        let outline = palette.outline();
+        let text = palette.text();
+        let muted = palette.text_muted();
+        let accent = palette.accent();
+        let name_field = blend(surface_alt, text, 0.8);
+        t.window_bg = background;
+        t.panel_bg = surface;
+        t.panel_bg2 = surface_alt;
+        t.toolbar_bg = background;
+        t.toolbar_group = blend(background, surface_alt, 0.5);
+        t.border = outline;
+        t.border_light = blend(outline, muted, 0.5);
+        t.edge_light = Color32::from_rgba_unmultiplied(t.border_light.r(), t.border_light.g(), t.border_light.b(), 48);
+        t.text = text;
+        t.text_dim = muted;
+        t.text_dark = ink_on(name_field);
+        t.header_text = blend(text, background, 0.15);
+        t.accent = accent;
+        t.accent_dark = darken(accent, 0.72);
+        t.mode_on = accent;
+        t.mode_on_text = palette.contrast_text();
+        t.mode_off_text = blend(accent, text, 0.45);
+        t.button = surface_alt;
+        t.button_hi = blend(surface_alt, text, 0.18);
+        t.button_border = outline;
+        t.name_field = name_field;
+        t.name_field_sel = blend(name_field, accent, 0.3);
+        t.ruler_bg = surface;
+        t.ruler_label_bg = surface_alt;
+        t.ruler_text = muted;
+        t.ruler_tick = blend(outline, muted, 0.5);
+        t.menu_bar = background;
+        t.row_selected = blend(surface_alt, accent, 0.35);
+        t.header_selected = blend(surface_alt, accent, 0.25);
+        t.strip_selected = blend(surface_alt, accent, 0.2);
+        t
+    }
+
     pub fn current() -> Tokens {
+        if let Some(tokens) = palette_tokens() {
+            return tokens;
+        }
         if is_light() { Self::LIGHT } else { Self::DARK }
     }
+}
+
+/// The active palette-derived tokens, if a suite palette is in use.
+fn palette_tokens() -> Option<Tokens> {
+    PALETTE_TOKENS.lock().map(|guard| *guard).unwrap_or(None)
+}
+
+fn set_palette_tokens(tokens: Option<Tokens>) {
+    if let Ok(mut guard) = PALETTE_TOKENS.lock() {
+        *guard = tokens;
+    }
+}
+
+/// Whether the effective theme family is light. A shared suite palette overrides the saved choice.
+pub fn effective_light(light: bool, palette: Option<&Palette>) -> bool {
+    palette.map_or(light, |palette| !palette.is_dark())
+}
+
+fn blend(a: Color32, b: Color32, k: f32) -> Color32 {
+    a.lerp_to_gamma(b, k.clamp(0.0, 1.0))
+}
+
+fn darken(color: Color32, k: f32) -> Color32 {
+    Color32::from_rgb((f32::from(color.r()) * k) as u8, (f32::from(color.g()) * k) as u8, (f32::from(color.b()) * k) as u8)
+}
+
+/// Black or white, whichever reads better on `background`.
+fn ink_on(background: Color32) -> Color32 {
+    if relative_luminance(background) > 0.179 { Color32::BLACK } else { Color32::WHITE }
+}
+
+fn relative_luminance(color: Color32) -> f32 {
+    let channel = |value: u8| {
+        let s = f32::from(value) / 255.0;
+        if s <= 0.039_28 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
 }
 
 /// Whether the Light palette is the active one.
@@ -452,7 +543,14 @@ pub fn mono(size: f32) -> FontId {
 
 /// Make `light` (or dark) the active palette and apply its visuals. Call only when it changes.
 pub fn apply(ctx: &egui::Context, light: bool) {
+    apply_palette(ctx, light, None);
+}
+
+/// Make the effective family (a suite palette overrides `light`) active and apply its visuals.
+pub fn apply_palette(ctx: &egui::Context, light: bool, palette: Option<&Palette>) {
+    let light = effective_light(light, palette);
     LIGHT_THEME.store(light, Ordering::Relaxed);
+    set_palette_tokens(palette.map(|palette| Tokens::for_palette(light, palette)));
     let t = Tokens::current();
     let mut v = if light { egui::Visuals::light() } else { egui::Visuals::dark() };
     v.panel_fill = t.panel_bg;
@@ -544,6 +642,106 @@ mod tests {
         assert_eq!(app.ui.theme, ThemeMode::Light);
         assert_eq!(app.run("ui.theme", json!({"mode": "system"})), Ok(json!({"mode": "system"})));
         assert!(crate::menus::UI_COMMANDS.iter().any(|c| c.0 == "ui.theme"));
+    }
+
+    #[test]
+    fn dark_palette_maps_core_chrome_only() {
+        let palette = Palette::dark();
+        let tokens = Tokens::for_palette(false, &palette);
+        assert_eq!(tokens.window_bg, palette.background());
+        assert_eq!(tokens.panel_bg, palette.surface());
+        assert_eq!(tokens.panel_bg2, palette.surface_alt());
+        assert_eq!(tokens.border, palette.outline());
+        assert_eq!(tokens.text, palette.text());
+        assert_eq!(tokens.text_dim, palette.text_muted());
+        assert_eq!(tokens.header_text, blend(palette.text(), palette.background(), 0.15));
+        assert_eq!(tokens.accent, palette.accent());
+        assert_eq!(tokens.accent_dark, darken(palette.accent(), 0.72));
+        assert_eq!(tokens.ruler_text, palette.text_muted());
+        assert_eq!(tokens.menu_bar, palette.background());
+        assert_eq!(tokens.row_selected, blend(palette.surface_alt(), palette.accent(), 0.35));
+        // Domain colours stay from the built-in dark set.
+        assert_eq!(tokens.meter_green, Tokens::DARK.meter_green);
+        assert_eq!(tokens.meter_bg, Tokens::DARK.meter_bg);
+        assert_eq!(tokens.fader_track, Tokens::DARK.fader_track);
+        assert_eq!(tokens.knob_bg, Tokens::DARK.knob_bg);
+        assert_eq!(tokens.selection, Tokens::DARK.selection);
+        assert_eq!(tokens.playhead, Tokens::DARK.playhead);
+        assert_eq!(tokens.automation_line, Tokens::DARK.automation_line);
+        assert_eq!(tokens.slot_face, Tokens::DARK.slot_face);
+    }
+
+    #[test]
+    fn light_palette_maps_core_chrome_only() {
+        let palette = Palette::light();
+        let tokens = Tokens::for_palette(true, &palette);
+        assert_eq!(tokens.window_bg, palette.background());
+        assert_eq!(tokens.panel_bg, palette.surface());
+        assert_eq!(tokens.toolbar_bg, palette.background());
+        assert_eq!(tokens.border_light, blend(palette.outline(), palette.text_muted(), 0.5));
+        assert_eq!(tokens.text, palette.text());
+        assert_eq!(tokens.text_dim, palette.text_muted());
+        assert_eq!(tokens.ruler_bg, palette.surface());
+        assert_eq!(tokens.ruler_label_bg, palette.surface_alt());
+        assert_eq!(tokens.header_selected, blend(palette.surface_alt(), palette.accent(), 0.25));
+        // Domain colours stay from the built-in light set.
+        assert_eq!(tokens.meter_green, Tokens::LIGHT.meter_green);
+        assert_eq!(tokens.meter_bg, Tokens::LIGHT.meter_bg);
+        assert_eq!(tokens.fader_track, Tokens::LIGHT.fader_track);
+        assert_eq!(tokens.knob_bg, Tokens::LIGHT.knob_bg);
+        assert_eq!(tokens.selection, Tokens::LIGHT.selection);
+        assert_eq!(tokens.playhead, Tokens::LIGHT.playhead);
+        assert_eq!(tokens.automation_line, Tokens::LIGHT.automation_line);
+    }
+
+    #[test]
+    fn palette_family_overrides_the_saved_choice() {
+        // A dark palette wins over a saved Light choice, and the other way round.
+        assert!(!effective_light(true, Some(&Palette::dark())));
+        assert!(effective_light(false, Some(&Palette::light())));
+        let tokens = Tokens::for_palette(effective_light(true, Some(&Palette::dark())), &Palette::dark());
+        assert!(relative_luminance(tokens.window_bg) < 0.2);
+        assert!(relative_luminance(tokens.text) > relative_luminance(tokens.window_bg));
+        // The dark family's egui stock visuals and domain colours, not the light ones.
+        assert_eq!(tokens.meter_green, Tokens::DARK.meter_green);
+        assert_eq!(tokens.fader_track, Tokens::DARK.fader_track);
+    }
+
+    #[test]
+    fn no_palette_keeps_the_built_in_family() {
+        let _held = lock_test_palette();
+        assert!(effective_light(true, None));
+        assert!(!effective_light(false, None));
+        let ctx = egui::Context::default();
+        apply_palette(&ctx, true, None);
+        assert!(is_light());
+        assert_eq!(Tokens::current().panel_bg, Tokens::LIGHT.panel_bg);
+        assert_eq!(Tokens::current().meter_green, Tokens::LIGHT.meter_green);
+        apply_palette(&ctx, false, None);
+        assert!(!is_light());
+        assert_eq!(Tokens::current().window_bg, Tokens::DARK.window_bg);
+        assert_eq!(Tokens::current().meter_green, Tokens::DARK.meter_green);
+    }
+
+    #[test]
+    fn accent_text_stays_readable() {
+        for palette in [Palette::dark(), Palette::light()] {
+            let tokens = Tokens::for_palette(!palette.is_dark(), &palette);
+            assert_eq!(tokens.mode_on, palette.accent());
+            assert_eq!(tokens.mode_on_text, palette.contrast_text());
+            assert!(contrast_ratio(tokens.mode_on_text, tokens.mode_on) >= 4.5, "on-accent text must stay readable");
+        }
+        // A bright accent gets dark ink, never hardcoded white.
+        let bright = Palette::from_canonical_json(&json!({"base00": "#101010", "base0D": "#f0e68c", "accent": "#f0e68c"})).unwrap();
+        let tokens = Tokens::for_palette(false, &bright);
+        assert_eq!(tokens.mode_on, bright.accent());
+        assert_eq!(tokens.mode_on_text, Color32::BLACK);
+    }
+
+    fn contrast_ratio(a: Color32, b: Color32) -> f32 {
+        let (first, second) = (relative_luminance(a), relative_luminance(b));
+        let (high, low) = if first > second { (first, second) } else { (second, first) };
+        (high + 0.05) / (low + 0.05)
     }
 
     #[test]
