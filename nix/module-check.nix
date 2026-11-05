@@ -110,7 +110,49 @@ let
   home = evalModule "home-manager" true { theme = "Light"; };
   homePlain = evalModule "home-manager" false { };
 
+  binaryStub = pkgs.runCommand "soundcraft-binary-stub" { } "touch $out";
+
+  evalDefault =
+    useBinary: binary:
+    lib.evalModules {
+      specialArgs = {
+        inherit pkgs;
+        soundcraftSourcePackage = soundcraft;
+        soundcraftBinaryPackage = binary;
+      };
+      modules = [
+        (import ./module.nix { kind = "nixos"; })
+        nixosStub
+        {
+          programs.soundcraft = {
+            enable = true;
+            inherit useBinary;
+          };
+        }
+      ];
+    };
+
+  nixosDefault = evalDefault true binaryStub;
+  nixosNoBinary = evalDefault true null;
+  nixosSourceChosen = evalDefault false binaryStub;
+
   assertions = [
+    {
+      what = "useBinary defaults to true";
+      ok = nixosDefault.config.programs.soundcraft.useBinary;
+    }
+    {
+      what = "the binary is the default package";
+      ok = nixosDefault.config.environment.systemPackages == [ binaryStub ];
+    }
+    {
+      what = "the source build is used without a binary";
+      ok = nixosNoBinary.config.environment.systemPackages == [ soundcraft ];
+    }
+    {
+      what = "useBinary = false selects the source build";
+      ok = nixosSourceChosen.config.environment.systemPackages == [ soundcraft ];
+    }
     {
       what = "nixos installs the package";
       ok = nixos.config.environment.systemPackages == [ soundcraft ];
