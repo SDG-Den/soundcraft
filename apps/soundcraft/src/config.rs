@@ -64,11 +64,13 @@ fn writable(dir: &Path) -> std::io::Result<()> {
 }
 
 /// Read bounded settings, recovering unreadable docking metadata independently of other settings.
+/// A `settings.override.json` beside the file (or `CRAFT_SETTINGS_FILE`) is merged over the saved
+/// settings; the app never writes it, so the declarative values survive a save.
 pub fn load_ui(path: &std::path::Path) -> Result<Option<soundcraft_ui_egui::UiState>, String> {
-    read_ui(path, true)
+    read_ui(path, true, true)
 }
 
-fn read_ui(path: &std::path::Path, recover_docking: bool) -> Result<Option<soundcraft_ui_egui::UiState>, String> {
+fn read_ui(path: &std::path::Path, recover_docking: bool, apply_overlay: bool) -> Result<Option<soundcraft_ui_egui::UiState>, String> {
     use std::io::Read as _;
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
@@ -81,6 +83,9 @@ fn read_ui(path: &std::path::Path, recover_docking: bool) -> Result<Option<sound
         return Err("Settings file exceeds the 4 MiB limit".into());
     }
     let mut saved: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| format!("Settings could not be restored: {error}"))?;
+    if apply_overlay && let Some(overlay) = path.parent().and_then(craft_settings::overlay::load_overlay) {
+        craft_settings::overlay::merge(&mut saved, overlay);
+    }
     docking::reset_old_layouts(&mut saved);
     if recover_docking && let Some(fields) = saved.as_object_mut() {
         for (field, mix) in [("docking", false), ("mix_docking", true)] {
@@ -105,7 +110,7 @@ const MAX_UI_BYTES: u64 = 4 * 1024 * 1024;
 pub fn save_ui(path: &std::path::Path, ui: &soundcraft_ui_egui::UiState) -> Result<(), String> {
     use std::io::Write as _;
     // Loading can recover a future layout for this session, but saving must preserve its source.
-    read_ui(path, false)?;
+    read_ui(path, false, false)?;
     docking::validate(&ui.docking)?;
     docking::validate_mix(&ui.mix_docking)?;
     let mut saved = ui.clone();
@@ -247,6 +252,23 @@ mod config_tests {
         assert!(load_ui(&path).is_err());
         assert!(save_ui(&path, &soundcraft_ui_egui::UiState::default()).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn settings_overlay_is_merged_over_saved_preferences() {
+        let directory = std::env::temp_dir().join(format!("soundcraft-overlay-prefs-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("ui.json");
+        let ui = soundcraft_ui_egui::UiState { theme: soundcraft_ui_egui::theme::ThemeMode::Light, narrow_mix: true, ..Default::default() };
+        save_ui(&path, &ui).unwrap();
+        std::fs::write(directory.join("settings.override.json"), br#"{"theme":"dark"}"#).unwrap();
+        let loaded = load_ui(&path).unwrap().unwrap();
+        assert_eq!(loaded.theme, soundcraft_ui_egui::theme::ThemeMode::Dark);
+        assert!(loaded.narrow_mix);
+        // The app never writes the overlay, so the saved file keeps the user's value.
+        let written: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written["theme"], "light");
         std::fs::remove_dir_all(directory).unwrap();
     }
 
