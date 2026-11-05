@@ -1,0 +1,8 @@
+{
+  "url": "https://github.com/SDG-Den/soundcraft/releases/download/binary-testing/soundcraft-0.16.0-linux-x86_64.tar.gz",
+  "hash": "sha256-k6bXqHiGLivQ+SPXTA7NvvhOApRlsxdmJeqGgzXfPag=",
+  "version": "0.16.0",
+  "tag": "binary-testing",
+  "system": "x86_64-linux",
+  "repo": "SDG-Den/soundcraft"
+}
